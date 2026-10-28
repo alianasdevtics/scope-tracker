@@ -1,0 +1,314 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Role {
+  PM
+  MEMBER
+}
+
+enum ProjectStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+enum FileType {
+  PDF
+  DOCX
+  TEXT
+}
+
+enum ReqSource {
+  SCOPE
+  CLARIFICATION
+  MANUAL
+}
+
+enum ReqStatus {
+  NOT_STARTED
+  PARTIAL
+  READY_FOR_REVIEW
+  APPROVED
+  REJECTED
+}
+
+enum CriterionState {
+  MET
+  NOT_MET
+  UNKNOWN
+}
+
+enum QuestionStatus {
+  OPEN
+  ANSWERED
+  SKIPPED
+}
+
+enum BaselineStatus {
+  NOT_RUN
+  RUNNING
+  DONE
+  SKIPPED_AI_OFF
+  FAILED
+}
+
+enum SuggestionStatus {
+  OPEN
+  ACCEPTED
+  DISMISSED
+}
+
+enum ReviewDecision {
+  APPROVED
+  REJECTED
+}
+
+enum ActivityCause {
+  COMMIT
+  PM_REVIEW
+  AI_ANALYSIS
+  BASELINE
+  MANUAL_EDIT
+  SUGGESTION
+}
+
+enum AiRunKind {
+  PARSE_SCOPE
+  QUESTIONS
+  APPLY_ANSWERS
+  EVALUATE
+  SUGGEST
+  BASELINE
+}
+
+enum AiRunStatus {
+  RUNNING
+  DONE
+  FAILED
+}
+
+enum DeliveryStatus {
+  RECEIVED
+  IGNORED
+  PROCESSED
+  FAILED
+}
+
+model User {
+  id           String        @id @default(uuid())
+  name         String
+  email        String        @unique
+  passwordHash String
+  role         Role          @default(MEMBER)
+  sessions     Session[]
+  projects     Project[]
+  reviews      Review[]
+  activity     ActivityLog[]
+}
+
+/// id is the SHA-256 of the cookie token, so a database read never yields a usable session.
+model Session {
+  id        String   @id
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+}
+
+model Project {
+  id            String          @id @default(uuid())
+  name          String
+  status        ProjectStatus   @default(ACTIVE)
+  createdById   String
+  createdBy     User            @relation(fields: [createdById], references: [id])
+  /// Next REQ-n number. Only ever increments, so IDs are never reused.
+  nextReqNumber Int             @default(1)
+  /// Set when the PM confirms the requirement list; the board is live from then on.
+  confirmedAt   DateTime?
+  createdAt     DateTime        @default(now())
+  scope         ScopeDocument?
+  requirements  Requirement[]
+  questions     Question[]
+  repo          RepoConnection?
+  commits       Commit[]
+  suggestions   Suggestion[]
+  aiRuns        AiRun[]
+}
+
+model ScopeDocument {
+  id            String   @id @default(uuid())
+  projectId     String   @unique
+  project       Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  fileName      String
+  fileType      FileType
+  extractedText String
+  uploadedAt    DateTime @default(now())
+}
+
+model Requirement {
+  id           String                @id @default(uuid())
+  projectId    String
+  project      Project               @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  code         String
+  module       String
+  title        String
+  description  String                @default("")
+  source       ReqSource
+  scopeExcerpt String?
+  status       ReqStatus             @default(NOT_STARTED)
+  /// Cause of the last status change; drives the "AI-detected" label.
+  statusCause  ActivityCause?
+  aiVerified   Boolean               @default(false)
+  deletedAt    DateTime?
+  createdAt    DateTime              @default(now())
+  criteria     AcceptanceCriterion[]
+  evidence     Evidence[]
+  suggestions  Suggestion[]
+  reviews      Review[]
+  activity     ActivityLog[]
+
+  @@unique([projectId, code])
+}
+
+model AcceptanceCriterion {
+  id              String         @id @default(uuid())
+  requirementId   String
+  requirement     Requirement    @relation(fields: [requirementId], references: [id], onDelete: Cascade)
+  text            String
+  state           CriterionState @default(UNKNOWN)
+  lastEvaluatedAt DateTime?
+  deletedAt       DateTime?
+  createdAt       DateTime       @default(now())
+}
+
+model Question {
+  id             String         @id @default(uuid())
+  projectId      String
+  project        Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  text           String
+  answer         String?
+  status         QuestionStatus @default(OPEN)
+  requirementIds String[]
+  createdAt      DateTime       @default(now())
+}
+
+model RepoConnection {
+  id             String         @id @default(uuid())
+  projectId      String         @unique
+  project        Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  installationId BigInt
+  /// GitHub's numeric repo id; survives renames. One project per repo.
+  repoId         BigInt         @unique
+  repoFullName   String
+  trackedBranch  String         @default("main")
+  baselineStatus BaselineStatus @default(NOT_RUN)
+  baselineError  String?
+  filesIndexed   Int            @default(0)
+  filesTotal     Int            @default(0)
+  reqsEvaluated  Int            @default(0)
+  reqsTotal      Int            @default(0)
+  connectedAt    DateTime       @default(now())
+}
+
+model Commit {
+  projectId       String
+  project         Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  sha             String
+  message         String
+  author          String
+  committedAt     DateTime
+  referencedCodes String[]
+  /// IDs in the message that don't match a live requirement in this project.
+  unknownCodes    String[]
+  isMerge         Boolean  @default(false)
+  receivedAt      DateTime @default(now())
+
+  @@id([projectId, sha])
+}
+
+/// File paths and AI summaries only. Never code or diffs.
+model Evidence {
+  id             String      @id @default(uuid())
+  requirementId  String
+  requirement    Requirement @relation(fields: [requirementId], references: [id], onDelete: Cascade)
+  /// Null for baseline analysis.
+  commitSha      String?
+  filePaths      String[]
+  aiSummary      String?
+  criteriaResult Json?
+  createdAt      DateTime    @default(now())
+
+  @@unique([requirementId, commitSha])
+}
+
+model Suggestion {
+  id            String           @id @default(uuid())
+  projectId     String
+  project       Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  commitSha     String
+  requirementId String
+  requirement   Requirement      @relation(fields: [requirementId], references: [id], onDelete: Cascade)
+  reason        String
+  status        SuggestionStatus @default(OPEN)
+  createdAt     DateTime         @default(now())
+
+  @@unique([projectId, commitSha, requirementId])
+}
+
+model Review {
+  id            String         @id @default(uuid())
+  requirementId String
+  requirement   Requirement    @relation(fields: [requirementId], references: [id], onDelete: Cascade)
+  reviewerId    String
+  reviewer      User           @relation(fields: [reviewerId], references: [id])
+  decision      ReviewDecision
+  /// Required when decision = REJECTED (CHECK constraint in the migration).
+  notes         String?
+  createdAt     DateTime       @default(now())
+}
+
+model ActivityLog {
+  id            String        @id @default(uuid())
+  requirementId String
+  requirement   Requirement   @relation(fields: [requirementId], references: [id], onDelete: Cascade)
+  /// Both null for non-status events such as text edits.
+  fromStatus    ReqStatus?
+  toStatus      ReqStatus?
+  cause         ActivityCause
+  causeRef      String?
+  detail        String?
+  actorId       String?
+  actor         User?         @relation(fields: [actorId], references: [id])
+  createdAt     DateTime      @default(now())
+
+  @@index([requirementId, createdAt])
+}
+
+/// Progress and failures of AI jobs, shown in the UI. Never holds code.
+model AiRun {
+  id            String      @id @default(uuid())
+  projectId     String
+  project       Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  kind          AiRunKind
+  status        AiRunStatus @default(RUNNING)
+  promptVersion String?
+  requirementId String?
+  commitSha     String?
+  error         String?
+  result        Json?
+  createdAt     DateTime    @default(now())
+  finishedAt    DateTime?
+}
+
+model WebhookDelivery {
+  /// X-GitHub-Delivery; redeliveries reuse it, so the primary key dedupes.
+  deliveryId  String         @id
+  event       String
+  receivedAt  DateTime       @default(now())
+  processedAt DateTime?
+  status      DeliveryStatus @default(RECEIVED)
+}
