@@ -10,6 +10,7 @@ export default defineConfig({
   test: {
     env: { DATABASE_URL: process.env.TEST_DATABASE_URL ?? '' },
     globalSetup: './vitest.global-setup.ts',
+    setupFiles: ['./test/setup.ts'],
     // DB-backed tests share one database.
     fileParallelism: false,
   },
